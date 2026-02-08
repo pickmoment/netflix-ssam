@@ -185,7 +185,7 @@ function processSubtitleText(url, text) {
                 if (currentCues.length === 0 || (player && player.getTimedTextTrack()?.bcp47 === lang)) {
                     currentCues = cues;
                     console.log("[Ext] Set active cues.");
-                    showToast(`Subtitles Loaded: ${cues.length} lines (${lang})`);
+                    // Toast notification removed - too intrusive
                 }
             } else {
                 console.log(`[Ext] Duplicate subtitle ignored for language: ${lang}`);
@@ -255,11 +255,10 @@ function resetExtensionState() {
     if (initInterval) clearInterval(initInterval);
     if (sessionInterval) clearInterval(sessionInterval);
     if (controlLoop) clearInterval(controlLoop);
-    if (urlMonitorInterval) clearInterval(urlMonitorInterval);
+    // DO NOT clear urlMonitorInterval - it needs to keep running to detect next episode
     initInterval = null;
     sessionInterval = null;
     controlLoop = null;
-    urlMonitorInterval = null;
 
     sessionId = null;
     player = null;
@@ -271,12 +270,14 @@ function resetExtensionState() {
     lastPrimaryLang = null;
     loopState = { active: false, remaining: 0, cue: null };
 
-    window.removeEventListener('keydown', handleKeyDown);
+    window.removeEventListener('keydown', handleKeyDown, true);
 
     const overlay = document.getElementById('netflix-ext-multisub');
     if (overlay) overlay.remove();
     const settings = document.getElementById('netflix-ext-settings');
     if (settings) settings.remove();
+    const langList = document.getElementById('netflix-ext-lang-list');
+    if (langList) langList.remove();
 }
 
 function startExtensionInit() {
@@ -310,7 +311,7 @@ function pollForSession() {
                     player = videoPlayer.getVideoPlayerBySessionId(sessionId);
                     console.log("Player session initialized:", sessionId);
 
-                    window.removeEventListener('keydown', handleKeyDown);
+                    window.removeEventListener('keydown', handleKeyDown, true);
                     initEvents();
 
                     controlLoop = setInterval(runControlLoop, 100);
@@ -323,7 +324,7 @@ function pollForSession() {
 }
 
 function initEvents() {
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true); // Use capture phase
     console.log("Listeners attached.");
 }
 
@@ -365,28 +366,105 @@ function handleKeyDown(e) {
     if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
 
     const code = e.code;
+    let handled = false;
 
     switch (code) {
-        case 'KeyA': seekToSubtitle(-1); break;
-        case 'KeyS': seekToSubtitle(0); break;
-        case 'KeyD': seekToSubtitle(1); break;
-        case 'KeyW': toggleLanguage(); break;
+        case 'KeyA':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            seekToSubtitle(-1);
+            handled = true;
+            break;
+        case 'KeyS':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            seekToSubtitle(0);
+            handled = true;
+            break;
+        case 'KeyD':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            seekToSubtitle(1);
+            handled = true;
+            break;
+        case 'KeyW':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            toggleLanguage();
+            handled = true;
+            break;
         // case 'KeyQ': Favorite feature removed, using registeredLangs instead
         // case 'KeyE': Multi-sub is now automatic
-        case 'KeyO': toggleSettings(); break;
+        case 'KeyO':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            toggleSettings();
+            handled = true;
+            break;
 
-        case 'KeyZ': adjustSpeed(-0.25); break;
-        case 'KeyX': resetSpeed(); break;
-        case 'KeyC': adjustSpeed(0.25); break;
+        case 'KeyJ':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            adjustSpeed(-0.25);
+            handled = true;
+            break;
+        case 'KeyK':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            resetSpeed();
+            handled = true;
+            break;
+        case 'KeyL':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            adjustSpeed(0.25);
+            handled = true;
+            break;
+        case 'KeyC':
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            exportSubtitlesToClipboard();
+            handled = true;
+            break;
+    }
+
+    if (handled) {
+        return false; // Additional blocking
     }
 }
 
 // --- Features ---
 
 function adjustSpeed(delta) {
+    // Try using Netflix Player API first
+    if (player && typeof player.setPlaybackRate === 'function') {
+        try {
+            const currentRate = player.getPlaybackRate();
+            let newRate = currentRate + delta;
+            if (newRate < 0.25) newRate = 0.25;
+            if (newRate > 5.0) newRate = 5.0;
+            player.setPlaybackRate(newRate);
+            showToast(`Speed: ${newRate.toFixed(2)}x`);
+            return;
+        } catch (e) {
+            console.error('[Ext] Player API setPlaybackRate failed:', e);
+        }
+    }
+
+    // Fallback to direct video element manipulation
     const video = document.querySelector('video');
     if (video) {
-        let newRate = video.playbackRate + delta;
+        const currentRate = video.playbackRate;
+        let newRate = currentRate + delta;
         if (newRate < 0.25) newRate = 0.25;
         if (newRate > 5.0) newRate = 5.0;
         video.playbackRate = newRate;
@@ -395,11 +473,93 @@ function adjustSpeed(delta) {
 }
 
 function resetSpeed() {
+    // Try using Netflix Player API first
+    if (player && typeof player.setPlaybackRate === 'function') {
+        try {
+            player.setPlaybackRate(1.0);
+            showToast("Speed: 1.0x");
+            return;
+        } catch (e) {
+            console.error('[Ext] Player API setPlaybackRate failed:', e);
+        }
+    }
+
+    // Fallback to direct video element manipulation
     const video = document.querySelector('video');
     if (video) {
         video.playbackRate = 1.0;
         showToast("Speed: 1.0x");
     }
+}
+
+function exportSubtitlesToClipboard() {
+    if (interceptedCues.length === 0) {
+        showToast('No subtitles loaded');
+        return;
+    }
+
+    // Collect all unique timestamps and organize cues by language
+    const timeMap = new Map(); // timestamp -> { lang1: text, lang2: text, ... }
+    const languages = new Set();
+
+    interceptedCues.forEach(ic => {
+        const lang = ic.lang || 'unknown';
+        languages.add(lang);
+
+        ic.cues.forEach(cue => {
+            const timeKey = `${cue.start.toFixed(3)}-${cue.end.toFixed(3)}`;
+
+            if (!timeMap.has(timeKey)) {
+                timeMap.set(timeKey, {
+                    start: cue.start,
+                    end: cue.end,
+                    texts: {}
+                });
+            }
+
+            timeMap.get(timeKey).texts[lang] = cue.text.replace(/\n/g, ' ').replace(/\t/g, ' ');
+        });
+    });
+
+    // Sort languages for consistent column order
+    const sortedLangs = Array.from(languages).sort();
+
+    // Build TSV header
+    let tsv = 'Start\tEnd\t' + sortedLangs.join('\t') + '\n';
+
+    // Sort by start time and build rows
+    const sortedEntries = Array.from(timeMap.values()).sort((a, b) => a.start - b.start);
+
+    sortedEntries.forEach(entry => {
+        const startTime = formatTime(entry.start);
+        const endTime = formatTime(entry.end);
+
+        const row = [startTime, endTime];
+        sortedLangs.forEach(lang => {
+            row.push(entry.texts[lang] || '');
+        });
+
+        tsv += row.join('\t') + '\n';
+    });
+
+    // Copy to clipboard
+    navigator.clipboard.writeText(tsv).then(() => {
+        const langList = sortedLangs.join(', ');
+        showToast(`Copied ${sortedEntries.length} subtitles\nLanguages: ${langList}`);
+        console.log('[Ext] Exported subtitles to clipboard:', sortedEntries.length, 'rows');
+    }).catch(err => {
+        console.error('[Ext] Failed to copy to clipboard:', err);
+        showToast('Failed to copy to clipboard');
+    });
+}
+
+function formatTime(milliseconds) {
+    const totalSeconds = milliseconds / 1000;
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = (totalSeconds % 60).toFixed(3);
+
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.padStart(6, '0')}`;
 }
 
 // Helper function to check if multi-sub should be shown
@@ -494,13 +654,16 @@ function updateMultiSubOverlay() {
         // Skip if this is the currently displayed language
         if (ic.lang && ic.lang !== 'unknown' && ic.lang === currentLang) return;
 
-        // NEW: Filter by registered & enabled
-        // If it's not in registeredLangs or is disabled, skip it.
-        // Exception: If multi-sub is enabled, we might want to allow 'unknown' if not yet registered?
-        // But the requirement is "only registered languages".
-        // Filter: must be in registeredLangs AND selected for Multi-Sub
+        // Filter by registered & enabled
+        // Special case: Allow 'unknown' cues to be shown if there are registered languages
+        // This handles the case where cues loaded before language detection
         const reg = registeredLangs[ic.lang];
-        if (!reg || !reg.selected) return;
+
+        // Show if: (1) registered AND selected, OR (2) unknown AND we have other registered languages
+        const shouldShow = (reg && reg.selected) ||
+            (ic.lang === 'unknown' && Object.keys(registeredLangs).length > 0);
+
+        if (!shouldShow) return;
 
         const cue = ic.cues.find(c => currentTime >= c.start && currentTime <= c.end);
         if (cue && cue.text) {
@@ -1003,6 +1166,17 @@ function registerCurrentLanguage() {
             selected: true, // Auto-select by default
             displayName: displayName
         };
+
+        // Re-tag any 'unknown' cues as this language
+        // This handles the case where subtitles loaded before language was detected
+        const unknownCues = interceptedCues.filter(ic => ic.lang === 'unknown');
+        if (unknownCues.length > 0) {
+            console.log(`[Ext] Re-tagging ${unknownCues.length} 'unknown' cue sets as ${lang}`);
+            unknownCues.forEach(ic => {
+                ic.lang = lang;
+            });
+        }
+
         updateLanguageListUI();
     } else {
         // Update display name if it changed (e.g. from a weird state to a correct one)
