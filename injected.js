@@ -6,8 +6,9 @@ let player = null;
 let sessionId = null;
 let currentCues = [];
 let interceptedCues = [];
-let favoriteLangs = []; // Array of bcp47 strings
-let multiSubEnabled = false; // Multi-subtitle toggle state
+let registeredLangs = {}; // Object: { bcp47: { selected: boolean, displayName: string } }
+// Multi-sub is now automatic based on registeredLangs state
+let lastPrimaryLang = null; // Track primary language to detect changes
 
 let activeVideoId = null;
 
@@ -266,7 +267,8 @@ function resetExtensionState() {
 
     currentCues = [];
     interceptedCues = [];
-    favoriteLangs = [];
+    registeredLangs = {};
+    lastPrimaryLang = null;
     loopState = { active: false, remaining: 0, cue: null };
 
     window.removeEventListener('keydown', handleKeyDown);
@@ -328,9 +330,12 @@ function initEvents() {
 function runControlLoop() {
     if (!player) return;
 
-    if (typeof multiSubEnabled !== 'undefined' && multiSubEnabled) {
-        updateMultiSubOverlay();
+    if (typeof registerCurrentLanguage === 'function') {
+        registerCurrentLanguage();
     }
+
+    // Update multi-sub overlay (automatic based on badge states)
+    updateMultiSubOverlay();
 
     if (loopState.active && loopState.cue) {
         const t = player.getCurrentTime();
@@ -366,8 +371,8 @@ function handleKeyDown(e) {
         case 'KeyS': seekToSubtitle(0); break;
         case 'KeyD': seekToSubtitle(1); break;
         case 'KeyW': toggleLanguage(); break;
-        case 'KeyQ': toggleFavorite(); break;
-        case 'KeyE': toggleMultiSub(); break;
+        // case 'KeyQ': Favorite feature removed, using registeredLangs instead
+        // case 'KeyE': Multi-sub is now automatic
         case 'KeyO': toggleSettings(); break;
 
         case 'KeyZ': adjustSpeed(-0.25); break;
@@ -397,32 +402,51 @@ function resetSpeed() {
     }
 }
 
-function toggleMultiSub() {
-    multiSubEnabled = !multiSubEnabled;
-    showToast(`Multi-Sub Mode: ${multiSubEnabled ? 'ON' : 'OFF'}`);
+// Helper function to check if multi-sub should be shown
+function shouldShowMultiSub() {
+    if (!player) return false;
 
-    const overlay = document.getElementById('netflix-ext-multisub');
-    if (!multiSubEnabled && overlay) {
-        overlay.style.display = 'none';
-    } else {
-        updateMultiSubOverlay();
-    }
+    // Use lastPrimaryLang instead of querying player
+    // This ensures Multi-Sub shows selected languages even when subtitles are off
+    const currentLang = lastPrimaryLang;
+
+    // Check if any registered language (except primary) is selected for Multi-Sub
+    return Object.keys(registeredLangs).some(lang => {
+        return lang !== currentLang && registeredLangs[lang].selected;
+    });
 }
 
 function updateMultiSubOverlay() {
-    if (!multiSubEnabled || !player) return;
+    // Check if multi-sub should be shown (automatic based on badge states)
+    if (!shouldShowMultiSub()) {
+        // Hide overlay if no enabled secondary languages
+        const overlay = document.getElementById('netflix-ext-multisub');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+        return;
+    }
+
+    if (!player) return;
 
     let overlay = document.getElementById('netflix-ext-multisub');
+    const targetContainer = document.fullscreenElement || document.body;
+
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'netflix-ext-multisub';
         overlay.style.position = 'fixed';
-        overlay.style.zIndex = '9999';
+        overlay.style.zIndex = '2147483647'; // Max z-index
         overlay.style.pointerEvents = 'none';
         overlay.style.display = 'flex';
         overlay.style.flexDirection = 'column';
         overlay.style.gap = '4px';
-        document.body.appendChild(overlay);
+        targetContainer.appendChild(overlay);
+    } else {
+        // Ensure it's in the correct container (moves it if needed)
+        if (overlay.parentElement !== targetContainer) {
+            targetContainer.appendChild(overlay);
+        }
     }
 
     overlay.style.display = 'flex';
@@ -463,13 +487,20 @@ function updateMultiSubOverlay() {
     const currentTime = player.getCurrentTime();
     const activeTexts = new Set();
 
-    let currentLang = 'unknown';
-    const track = player.getTimedTextTrack();
-    if (track) currentLang = track.bcp47;
+    // Use lastPrimaryLang to determine which language to exclude from overlay
+    const currentLang = lastPrimaryLang || 'unknown';
 
     interceptedCues.forEach((ic) => {
         // Skip if this is the currently displayed language
         if (ic.lang && ic.lang !== 'unknown' && ic.lang === currentLang) return;
+
+        // NEW: Filter by registered & enabled
+        // If it's not in registeredLangs or is disabled, skip it.
+        // Exception: If multi-sub is enabled, we might want to allow 'unknown' if not yet registered?
+        // But the requirement is "only registered languages".
+        // Filter: must be in registeredLangs AND selected for Multi-Sub
+        const reg = registeredLangs[ic.lang];
+        if (!reg || !reg.selected) return;
 
         const cue = ic.cues.find(c => currentTime >= c.start && currentTime <= c.end);
         if (cue && cue.text) {
@@ -693,40 +724,6 @@ function saveSettings() {
     localStorage.setItem('netflix-ssam-settings', JSON.stringify(subStyle));
 }
 
-function toggleFavorite() {
-    if (!player) {
-        console.warn("[Ext] Player not available");
-        return;
-    }
-
-    const currentTrack = player.getTimedTextTrack();
-    if (!currentTrack) {
-        showToast("No active track");
-        return;
-    }
-
-    const lang = currentTrack.bcp47;
-    const displayName = currentTrack.displayName || lang;
-    const idx = favoriteLangs.indexOf(lang);
-
-    if (idx === -1) {
-        favoriteLangs.push(lang);
-        showToast(`Added Favorite: ${displayName}`);
-
-        if (interceptedCues.length > 0) {
-            const currentActive = interceptedCues[interceptedCues.length - 1];
-            if (currentActive && currentActive.lang === 'unknown') {
-                currentActive.lang = lang;
-                console.log(`[Ext] Tagged cues as ${lang}`);
-            }
-        }
-    } else {
-        favoriteLangs.splice(idx, 1);
-        showToast(`Removed Favorite: ${displayName}`);
-    }
-    console.log("Favorites:", favoriteLangs);
-}
-
 function seekToSubtitle(offset) {
     if (!player) {
         console.warn("[Ext] Player not available for seek");
@@ -912,11 +909,10 @@ function toggleLanguage() {
 
     let targetList = validTracks;
 
-    if (favoriteLangs.length > 0) {
-        const favTracks = validTracks.filter(t => favoriteLangs.includes(t.bcp47));
-        if (favTracks.length > 0) {
-            targetList = favTracks;
-        }
+    // Use registeredLangs to prioritize languages
+    const registeredTracks = validTracks.filter(t => registeredLangs[t.bcp47]);
+    if (registeredTracks.length > 0) {
+        targetList = registeredTracks;
     }
 
     let currentIndex = -1;
@@ -941,7 +937,6 @@ function toggleLanguage() {
         showToast(`Language: ${newTrack.displayName || newTrack.bcp47}`);
 
         // Try to find cached subtitles for the new language
-        const cachedForLang = interceptedCues.find(ic => ic.lang === newTrack.bcp47);
         if (cachedForLang && cachedForLang.cues) {
             currentCues = cachedForLang.cues;
             console.log(`[Ext] Using cached cues for language: ${newTrack.bcp47}`);
@@ -949,5 +944,224 @@ function toggleLanguage() {
             currentCues = [];
             console.log(`[Ext] No cached cues for language: ${newTrack.bcp47}, waiting for load...`);
         }
+    }
+}
+
+// --- Dynamic Multi-Sub Logic ---
+
+function registerCurrentLanguage() {
+    if (!player) return;
+    const track = player.getTimedTextTrack();
+
+    // Debug logging (commented out to reduce console noise)
+    // console.log("[Ext] Track Info:", track.bcp47, track.displayName, track.isNone);
+
+    // Precise "Off" detection
+    if (!track) {
+        if (lastPrimaryLang !== null) {
+            lastPrimaryLang = null;
+            updateLanguageListUI();
+        }
+        return;
+    }
+    if (track.isNone) {
+        if (lastPrimaryLang !== null) {
+            lastPrimaryLang = null;
+            updateLanguageListUI();
+        }
+        return;
+    }
+    if (track.bcp47 === 'off') {
+        if (lastPrimaryLang !== null) {
+            lastPrimaryLang = null;
+            updateLanguageListUI();
+        }
+        return;
+    }
+
+    // Check for display names that indicate "Off"
+    // RESTORED: Name-based check required because Netflix sometimes assigns 'en' code to 'Off' track.
+    const name = (track.displayName || "").toLowerCase();
+    if (name === 'off' || name === '끄기') {
+        // console.log(`[Ext] Detected Off state with bcp47: ${track.bcp47}, displayName: ${track.displayName}`);
+        if (lastPrimaryLang !== null) {
+            // console.log(`[Ext] Clearing primary language due to Off state`);
+            lastPrimaryLang = null;
+            updateLanguageListUI();
+        }
+        return;
+    }
+
+    const lang = track.bcp47;
+    if (!lang) return; // Invalid bcp47
+
+    const displayName = track.displayName || lang;
+
+    if (!registeredLangs[lang]) {
+        console.log(`[Ext] Registering new language: ${lang} (${displayName})`);
+        registeredLangs[lang] = {
+            selected: true, // Auto-select by default
+            displayName: displayName
+        };
+        updateLanguageListUI();
+    } else {
+        // Update display name if it changed (e.g. from a weird state to a correct one)
+        if (registeredLangs[lang].displayName !== displayName) {
+            console.log(`[Ext] Updating display name for ${lang}: ${registeredLangs[lang].displayName} -> ${displayName}`);
+            registeredLangs[lang].displayName = displayName;
+            updateLanguageListUI();
+        }
+    }
+
+    // Check if primary language changed (to update badge colors)
+    if (lastPrimaryLang !== lang) {
+        console.log(`[Ext] Primary language changed: ${lastPrimaryLang} -> ${lang}`);
+        lastPrimaryLang = lang;
+        updateLanguageListUI();
+    }
+}
+
+function updateLanguageListUI() {
+    let container = document.getElementById('netflix-ext-lang-list');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'netflix-ext-lang-list';
+        container.style.position = 'fixed';
+        container.style.top = '20px';
+        container.style.right = '20px';
+        container.style.display = 'flex';
+        container.style.flexDirection = 'column';
+        container.style.gap = '5px';
+        container.style.zIndex = '2147483647';
+        container.style.pointerEvents = 'auto'; // Must be clickable
+        document.body.appendChild(container);
+    }
+
+    // Ensure it stays on top / attached to correct parent in fullscreen
+    const targetParent = document.fullscreenElement || document.body;
+    if (container.parentElement !== targetParent) {
+        targetParent.appendChild(container);
+    }
+
+    // Clear and rebuild
+    container.innerHTML = '';
+
+    // Use lastPrimaryLang instead of querying player to avoid stale data
+    const currentLang = lastPrimaryLang;
+
+    Object.keys(registeredLangs).forEach(lang => {
+        const data = registeredLangs[lang];
+        const badge = document.createElement('div');
+        badge.innerText = data.displayName;
+        badge.style.padding = '5px 10px';
+        badge.style.borderRadius = '20px'; // Pill shape
+        badge.style.cursor = 'pointer';
+        badge.style.fontSize = '14px';
+        badge.style.fontWeight = 'bold';
+        badge.style.userSelect = 'none';
+        badge.style.transition = 'all 0.2s';
+        badge.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
+
+        // Check if this is the primary language
+        const isPrimary = (lang === currentLang);
+
+        if (isPrimary) {
+            // Primary language - Blue/Purple
+            badge.style.backgroundColor = 'rgba(52, 152, 219, 0.9)'; // Blue
+            badge.style.color = 'white';
+            badge.style.opacity = '1';
+            badge.style.border = '2px solid rgba(255, 255, 255, 0.8)';
+        } else if (data.selected) {
+            // Selected for Multi-Sub - Green
+            badge.style.backgroundColor = 'rgba(46, 204, 113, 0.9)'; // Green
+            badge.style.color = 'white';
+            badge.style.opacity = '1';
+        } else {
+            // Unselected (hidden from Multi-Sub) - Grey
+            badge.style.backgroundColor = 'rgba(0, 0, 0, 0.6)'; // Grey/Black
+            badge.style.color = '#aaa';
+            badge.style.opacity = '0.7';
+        }
+
+        // Click Handling (Single vs Double)
+        let clickTimer = null;
+
+        badge.onclick = (e) => {
+            e.stopPropagation();
+
+            if (clickTimer) {
+                clearTimeout(clickTimer);
+                clickTimer = null;
+                // Double Click Action: Switch Language or Turn Off
+                if (isPrimary) {
+                    // If clicking primary badge, turn off subtitles
+                    turnOffSubtitles();
+                } else {
+                    // If clicking non-primary badge, switch to that language
+                    switchLanguage(lang);
+                }
+            } else {
+                clickTimer = setTimeout(() => {
+                    clickTimer = null;
+                    // Single Click Action: Toggle Visibility
+                    data.selected = !data.selected;
+                    updateLanguageListUI();
+                    updateMultiSubOverlay();
+                }, 250); // 250ms delay to wait for potential second click
+            }
+        };
+
+        container.appendChild(badge);
+    });
+}
+
+function turnOffSubtitles() {
+    if (!player) return;
+
+    const trackList = player.getTimedTextTrackList();
+    if (!trackList) return;
+
+    // Find the 'Off' track
+    const offTrack = trackList.find(t => {
+        const name = (t.displayName || "").toLowerCase();
+        return name === 'off' || name === '끄기' || t.isNone || t.bcp47 === 'off';
+    });
+
+    if (offTrack) {
+        console.log(`[Ext] Double-click primary: turning off subtitles`);
+        player.setTextTrack(offTrack);
+        showToast('Subtitles: Off');
+
+        // Update UI to reflect no primary language
+        setTimeout(() => {
+            updateLanguageListUI();
+            updateMultiSubOverlay();
+        }, 100); // Small delay to ensure player state has updated
+    }
+}
+
+function switchLanguage(targetLang) {
+    if (!player) return;
+
+    const trackList = player.getTimedTextTrackList();
+    if (!trackList) return;
+
+    // Filter out 'Off' tracks to avoid switching to them
+    const validTracks = trackList.filter(t => {
+        const name = (t.displayName || "").toLowerCase();
+        return name !== 'off' && name !== '끄기' && !t.isNone;
+    });
+
+    const targetTrack = validTracks.find(t => t.bcp47 === targetLang);
+    if (targetTrack) {
+        console.log(`[Ext] Double-click switch to: ${targetLang}`);
+        player.setTextTrack(targetTrack);
+        showToast(`Switched to: ${targetTrack.displayName || targetLang}`);
+
+        // Update UI to reflect the new primary language
+        setTimeout(() => {
+            updateLanguageListUI();
+            updateMultiSubOverlay();
+        }, 100); // Small delay to ensure player state has updated
     }
 }
