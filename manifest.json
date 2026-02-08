@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Netflix SSAM",
+  "version": "1.0",
+  "description": "Control Netflix subtitles, speeds, and more with SSAM integration.",
+  "permissions": [
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.netflix.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.netflix.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["*://*.netflix.com/*"]
+    }
+  ]
+}
