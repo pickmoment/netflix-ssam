@@ -25,6 +25,8 @@ let loopState = {
 // Sentence Mode State
 let sentencePaused = false;
 let sentenceLastCue = null;
+let lastPlaybackTime = null;
+let lastTimeCheckAt = 0;
 
 // Settings State
 let subStyle = {
@@ -319,6 +321,8 @@ function handleVideoChange(newId) {
 function runControlLoop() {
     if (!player) return;
 
+    detectTimeJump();
+
     if (typeof registerCurrentLanguage === 'function') {
         registerCurrentLanguage();
     }
@@ -341,6 +345,29 @@ function runControlLoop() {
                 console.log("Loop finished.");
             }
         }
+    }
+}
+
+function detectTimeJump() {
+    const now = Date.now();
+    if (now - lastTimeCheckAt < 200) return;
+    lastTimeCheckAt = now;
+
+    const t = player.getCurrentTime();
+    if (lastPlaybackTime === null) {
+        lastPlaybackTime = t;
+        return;
+    }
+
+    const delta = t - lastPlaybackTime;
+    lastPlaybackTime = t;
+
+    // Detect large forward/backward jumps (e.g., ads or seeking)
+    if (Math.abs(delta) >= 5) {
+        console.log(`[Ext] Time jump detected (${delta.toFixed(2)}s). Resetting cues.`);
+        currentCues = [];
+        sentencePaused = false;
+        sentenceLastCue = null;
     }
 }
 
