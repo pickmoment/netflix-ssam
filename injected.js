@@ -25,15 +25,24 @@ let loopState = {
     cue: null
 };
 
+// Sentence Mode State
+let sentencePaused = false;
+let sentenceLastCue = null;
+
 // Settings State
 let subStyle = {
     fontSize: 22,
     color: '#ffffff',
+    colorAlt: '#9ad7ff',
+    textOpacity: 1,
     opacity: 0.6,
     bottom: 15, // Acts as "Vertical Margin %"
     repeatCount: 1,
+    multiSubEnabled: true,
+    sentenceMode: false,
+    langOrder: [],
     hAlign: 'center', // left, center, right (text alignment)
-    vAlign: 'top',     // top, bottom
+    vAlign: 'top',     // top, center, bottom
     hPosition: 50,    // Horizontal position 0-100 (0=left, 50=center, 100=right)
     width: 80         // Box width 10-100 (%)
 };
@@ -111,28 +120,36 @@ function extractLangFromUrl(url) {
         // Try to parse URL parameters
         const urlObj = new URL(url);
 
-        // Check for lang parameter
-        const langParam = urlObj.searchParams.get('lang');
+        // Check common language params
+        const langParam =
+            urlObj.searchParams.get('lang') ||
+            urlObj.searchParams.get('bcp47') ||
+            urlObj.searchParams.get('language') ||
+            urlObj.searchParams.get('locale');
         if (langParam) {
-            return langParam;
+            const cleaned = normalizeLangToken(langParam);
+            if (cleaned) return cleaned;
         }
 
         // Check for language code in path (e.g., /ko-KR/, /en-US/)
-        const pathMatch = url.match(/\/([a-z]{2}-[A-Z]{2})\//);
+        const pathMatch = url.match(/\/([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*)\//);
         if (pathMatch) {
-            return pathMatch[1];
+            const cleaned = normalizeLangToken(pathMatch[1]);
+            if (cleaned) return cleaned;
         }
 
         // Check for language code in query string without proper parsing
-        const langMatch = url.match(/[?&]lang=([^&]+)/);
+        const langMatch = url.match(/[?&](?:lang|bcp47|language|locale)=([^&]+)/);
         if (langMatch) {
-            return langMatch[1];
+            const cleaned = normalizeLangToken(langMatch[1]);
+            if (cleaned) return cleaned;
         }
 
         // Check for bcp47 or similar parameter
         const bcp47Match = url.match(/[?&](?:bcp47|language)=([^&]+)/);
         if (bcp47Match) {
-            return bcp47Match[1];
+            const cleaned = normalizeLangToken(bcp47Match[1]);
+            if (cleaned) return cleaned;
         }
 
     } catch (e) {
@@ -140,6 +157,52 @@ function extractLangFromUrl(url) {
     }
 
     return null;
+}
+
+function normalizeLangToken(token) {
+    if (!token) return null;
+    let t = token;
+    try {
+        t = decodeURIComponent(t);
+    } catch (e) { }
+
+    // Normalize separators and remove common suffixes
+    t = t.replace(/_/g, '-').replace(/\.xml$/i, '').trim();
+    if (!t) return null;
+
+    // If multiple values are provided, prefer the first
+    if (t.includes(',')) t = t.split(',')[0].trim();
+
+    // Validate against a loose BCP47-like pattern (supports "ko", "es-419", "zh-Hans", "pt-BR", etc.)
+    const match = t.match(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/);
+    if (!match) return null;
+
+    return canonicalizeBcp47(t);
+}
+
+function canonicalizeBcp47(tag) {
+    const parts = tag.split('-').filter(Boolean);
+    if (parts.length === 0) return tag;
+
+    const out = [];
+    // Language subtag: lower
+    out.push(parts[0].toLowerCase());
+
+    for (let i = 1; i < parts.length; i++) {
+        const p = parts[i];
+        if (p.length === 4) {
+            // Script subtag: Title Case
+            out.push(p[0].toUpperCase() + p.slice(1).toLowerCase());
+        } else if (p.length === 2 || (p.length === 3 && /^\d+$/.test(p))) {
+            // Region subtag: upper (2 letters or 3 digits)
+            out.push(p.toUpperCase());
+        } else {
+            // Variant/extension: lower
+            out.push(p.toLowerCase());
+        }
+    }
+
+    return out.join('-');
 }
 
 function processSubtitleText(url, text) {
@@ -154,36 +217,50 @@ function processSubtitleText(url, text) {
             if (!lang && player) {
                 const track = player.getTimedTextTrack();
                 if (track && track.bcp47 && track.bcp47 !== 'off') {
-                    lang = track.bcp47;
+                    lang = canonicalizeBcp47(track.bcp47);
                 }
             }
 
             // Fallback to 'unknown'
             if (!lang) {
                 lang = 'unknown';
+            } else if (lang !== 'unknown') {
+                lang = canonicalizeBcp47(lang);
             }
 
             // Create a simple content hash for duplicate detection
             const contentHash = cues.slice(0, 5).map(c => c.text).join('|');
 
             // Check for duplicates by language and content hash
+            const langNorm = (lang && lang !== 'unknown') ? canonicalizeBcp47(lang) : 'unknown';
             const existing = interceptedCues.find(ic =>
-                ic.lang === lang && ic.contentHash === contentHash
+                ic.videoId === activeVideoId &&
+                ((ic.lang && canonicalizeBcp47(ic.lang) === langNorm) || (ic.lang === 'unknown' && langNorm === 'unknown')) &&
+                ic.contentHash === contentHash
             );
 
             if (!existing) {
                 interceptedCues.push({
                     url: url,
                     cues: cues,
-                    lang: lang,
+                    lang: langNorm,
                     contentHash: contentHash,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    videoId: activeVideoId
                 });
                 console.log(`[Ext] Parsed ${cues.length} cues. Language: ${lang}`);
 
                 // Set as active cues if this is the first subtitle or current player language matches
-                if (currentCues.length === 0 || (player && player.getTimedTextTrack()?.bcp47 === lang)) {
+                const currentTrackLang = player && player.getTimedTextTrack()?.bcp47
+                    ? canonicalizeBcp47(player.getTimedTextTrack().bcp47)
+                    : null;
+                if (currentCues.length === 0 || (currentTrackLang && currentTrackLang === langNorm)) {
                     currentCues = cues;
+                    // If sentence mode is enabled and we were waiting for cues, reset state
+                    if (subStyle.sentenceMode) {
+                        sentencePaused = false;
+                        sentenceLastCue = null;
+                    }
                     console.log("[Ext] Set active cues.");
                     // Toast notification removed - too intrusive
                 }
@@ -269,8 +346,11 @@ function resetExtensionState() {
     registeredLangs = {};
     lastPrimaryLang = null;
     loopState = { active: false, remaining: 0, cue: null };
+    sentencePaused = false;
+    sentenceLastCue = null;
 
     window.removeEventListener('keydown', handleKeyDown, true);
+    document.removeEventListener('fullscreenchange', handleFullscreenChange);
 
     const overlay = document.getElementById('netflix-ext-multisub');
     if (overlay) overlay.remove();
@@ -278,6 +358,18 @@ function resetExtensionState() {
     if (settings) settings.remove();
     const langList = document.getElementById('netflix-ext-lang-list');
     if (langList) langList.remove();
+}
+
+function handleFullscreenChange() {
+    // Ensure overlays follow the fullscreen container
+    const targetParent = document.fullscreenElement || document.body;
+    const ids = ['netflix-ext-lang-list', 'netflix-ext-settings', 'netflix-ext-multisub'];
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.parentElement !== targetParent) {
+            targetParent.appendChild(el);
+        }
+    });
 }
 
 function startExtensionInit() {
@@ -325,6 +417,7 @@ function pollForSession() {
 
 function initEvents() {
     window.addEventListener('keydown', handleKeyDown, true); // Use capture phase
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
     console.log("Listeners attached.");
 }
 
@@ -337,6 +430,8 @@ function runControlLoop() {
 
     // Update multi-sub overlay (automatic based on badge states)
     updateMultiSubOverlay();
+
+    handleSentenceMode();
 
     if (loopState.active && loopState.cue) {
         const t = player.getCurrentTime();
@@ -387,7 +482,11 @@ function handleKeyDown(e) {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            seekToSubtitle(1);
+            if (subStyle.sentenceMode && sentencePaused) {
+                resumeNextSentence();
+            } else {
+                seekToSubtitle(1);
+            }
             handled = true;
             break;
         case 'KeyW':
@@ -565,6 +664,7 @@ function formatTime(milliseconds) {
 // Helper function to check if multi-sub should be shown
 function shouldShowMultiSub() {
     if (!player) return false;
+    if (!subStyle.multiSubEnabled) return false;
 
     // Use lastPrimaryLang instead of querying player
     // This ensures Multi-Sub shows selected languages even when subtitles are off
@@ -616,7 +716,8 @@ function updateMultiSubOverlay() {
     // 0% = left edge, 50% = center, 100% = right edge
     overlay.style.left = `${subStyle.hPosition}%`;
     overlay.style.right = 'auto';
-    overlay.style.transform = `translateX(-${subStyle.hPosition}%)`;
+    const yTransform = (subStyle.vAlign === 'center') ? '-50%' : '0';
+    overlay.style.transform = `translate(${ -subStyle.hPosition}%, ${yTransform})`;
 
     // --- Vertical Alignment ---
     // subStyle.bottom acts as "Margin from Edge"
@@ -625,6 +726,10 @@ function updateMultiSubOverlay() {
         overlay.style.top = 'auto';
         overlay.style.bottom = `${subStyle.bottom}%`;
         overlay.style.flexDirection = 'column-reverse'; // Grow upwards
+    } else if (subStyle.vAlign === 'center') {
+        overlay.style.top = '50%';
+        overlay.style.bottom = 'auto';
+        overlay.style.flexDirection = 'column'; // Grow downwards
     } else {
         // TOP (default)
         // If user wants it roughly at the same place as before (15% bottom -> 85% top)
@@ -645,23 +750,25 @@ function updateMultiSubOverlay() {
     overlay.innerHTML = '';
 
     const currentTime = player.getCurrentTime();
-    const activeTexts = new Set();
+    const langToText = new Map();
 
     // Use lastPrimaryLang to determine which language to exclude from overlay
     const currentLang = lastPrimaryLang || 'unknown';
 
     interceptedCues.forEach((ic) => {
+        if (ic.videoId !== activeVideoId) return;
         // Skip if this is the currently displayed language
-        if (ic.lang && ic.lang !== 'unknown' && ic.lang === currentLang) return;
+        const icLangNorm = (ic.lang && ic.lang !== 'unknown') ? canonicalizeBcp47(ic.lang) : 'unknown';
+        if (icLangNorm !== 'unknown' && icLangNorm === currentLang) return;
 
         // Filter by registered & enabled
         // Special case: Allow 'unknown' cues to be shown if there are registered languages
         // This handles the case where cues loaded before language detection
-        const reg = registeredLangs[ic.lang];
+        const reg = registeredLangs[icLangNorm];
 
         // Show if: (1) registered AND selected, OR (2) unknown AND we have other registered languages
         const shouldShow = (reg && reg.selected) ||
-            (ic.lang === 'unknown' && Object.keys(registeredLangs).length > 0);
+            (icLangNorm === 'unknown' && Object.keys(registeredLangs).length > 0);
 
         if (!shouldShow) return;
 
@@ -682,7 +789,7 @@ function updateMultiSubOverlay() {
                 const nativeTrimmed = nativeText.trim();
                 if (nativeTrimmed && (nativeText.includes(text) || text.includes(nativeTrimmed))) {
                     // If this was marked as 'unknown', we can now tag it
-                    if (ic.lang === 'unknown' && currentLang !== 'unknown') {
+                    if (icLangNorm === 'unknown' && currentLang !== 'unknown') {
                         ic.lang = currentLang;
                         console.log(`[Ext] Auto-tagged 'unknown' cues as ${currentLang} (matched native text)`);
                     }
@@ -693,19 +800,33 @@ function updateMultiSubOverlay() {
                 console.debug("[Ext] DOM selector warning:", e);
             }
 
-            activeTexts.add(text);
+            if (!langToText.has(icLangNorm)) {
+                langToText.set(icLangNorm, text);
+            }
         }
     });
 
-    const texts = Array.from(activeTexts);
+    const activeLangs = Array.from(langToText.keys());
+    const regOrder = getOrderedLangs();
+    activeLangs.sort((a, b) => {
+        const ai = regOrder.indexOf(a);
+        const bi = regOrder.indexOf(b);
+        const aRank = ai === -1 ? Number.MAX_SAFE_INTEGER : ai;
+        const bRank = bi === -1 ? Number.MAX_SAFE_INTEGER : bi;
+        if (aRank !== bRank) return aRank - bRank;
+        return a.localeCompare(b);
+    });
 
-    texts.forEach(text => {
+    activeLangs.forEach((lang, idx) => {
+        const text = langToText.get(lang);
+        if (!text) return;
         const p = document.createElement('p');
         p.innerText = text;
         p.style.margin = '0';
         p.style.padding = '4px 8px';
         p.style.backgroundColor = `rgba(0,0,0,${subStyle.opacity})`;
-        p.style.color = subStyle.color;
+        const baseColor = (idx % 2 === 0) ? subStyle.color : subStyle.colorAlt;
+        p.style.color = colorWithOpacity(baseColor, subStyle.textOpacity);
         p.style.fontSize = `${subStyle.fontSize}px`;
         p.style.fontWeight = 'bold';
         p.style.borderRadius = '4px';
@@ -722,6 +843,7 @@ function toggleSettings() {
         return;
     }
 
+    const targetParent = document.fullscreenElement || document.body;
     settings = document.createElement('div');
     settings.id = 'netflix-ext-settings';
     settings.style.position = 'fixed';
@@ -731,7 +853,7 @@ function toggleSettings() {
     settings.style.padding = '20px';
     settings.style.borderRadius = '8px';
     settings.style.color = 'white';
-    settings.style.zIndex = '10000';
+    settings.style.zIndex = '2147483647';
     settings.style.display = 'flex';
     settings.style.flexDirection = 'column';
     settings.style.gap = '10px';
@@ -749,10 +871,35 @@ function toggleSettings() {
         saveSettings();
     });
 
+    addCheckbox(settings, 'Sentence Mode (Auto Pause)', subStyle.sentenceMode, (checked) => {
+        subStyle.sentenceMode = checked;
+        if (!checked) {
+            sentencePaused = false;
+            sentenceLastCue = null;
+        }
+        saveSettings();
+    });
+
+    addCheckbox(settings, 'Multi-Sub Enabled', subStyle.multiSubEnabled, (checked) => {
+        subStyle.multiSubEnabled = checked;
+        saveSettings();
+        updateMultiSubOverlay();
+    });
+
     addSetting(settings, 'Text Color', 'color', subStyle.color, (val) => {
         subStyle.color = val;
         saveSettings();
     });
+
+    addSetting(settings, 'Text Color 2', 'color', subStyle.colorAlt, (val) => {
+        subStyle.colorAlt = val;
+        saveSettings();
+    });
+
+    addSetting(settings, 'Text Opacity (0-1)', 'range', subStyle.textOpacity, (val) => {
+        subStyle.textOpacity = parseFloat(val);
+        saveSettings();
+    }, 0, 1, 0.05);
 
     addSetting(settings, 'Opacity (0-1)', 'range', subStyle.opacity, (val) => {
         subStyle.opacity = parseFloat(val);
@@ -771,7 +918,7 @@ function toggleSettings() {
     });
 
     // Vertical Align (Select)
-    addSelect(settings, 'Vertical Align', subStyle.vAlign, ['top', 'bottom'], (val) => {
+    addSelect(settings, 'Vertical Align', subStyle.vAlign, ['top', 'center', 'bottom'], (val) => {
         subStyle.vAlign = val;
         saveSettings();
     });
@@ -802,7 +949,7 @@ function toggleSettings() {
     closeBtn.onclick = () => settings.remove();
     settings.appendChild(closeBtn);
 
-    document.body.appendChild(settings);
+    targetParent.appendChild(settings);
 }
 
 function addSetting(parent, label, type, value, onChange, min, max, step) {
@@ -841,6 +988,46 @@ function addSetting(parent, label, type, value, onChange, min, max, step) {
     container.appendChild(lbl);
     container.appendChild(input);
     parent.appendChild(container);
+}
+
+function addCheckbox(parent, label, checked, onChange) {
+    const container = document.createElement('div');
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+    container.style.gap = '8px';
+
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!checked;
+
+    const lbl = document.createElement('label');
+    lbl.innerText = label;
+    lbl.style.fontSize = '12px';
+    lbl.style.color = '#ccc';
+
+    input.addEventListener('change', (e) => {
+        onChange(e.target.checked);
+    });
+
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+    });
+
+    container.appendChild(input);
+    container.appendChild(lbl);
+    parent.appendChild(container);
+}
+
+function colorWithOpacity(color, opacity) {
+    const hex = (color || '').trim();
+    const m = hex.match(/^#([0-9a-fA-F]{6})$/);
+    if (!m) return color;
+    const intVal = parseInt(m[1], 16);
+    const r = (intVal >> 16) & 255;
+    const g = (intVal >> 8) & 255;
+    const b = intVal & 255;
+    const a = Math.min(1, Math.max(0, opacity));
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
 function addSelect(parent, label, value, options, onChange) {
@@ -973,6 +1160,117 @@ function performSeek(currentTime, offset) {
         console.log(`Seeking to: ${targetCue.start} (${targetCue.text})`);
         player.seek(targetCue.start);
         showToast(targetCue.text);
+        sentencePaused = false;
+    }
+}
+
+function resolveCurrentLang() {
+    if (lastPrimaryLang) return lastPrimaryLang;
+    if (player) {
+        const track = player.getTimedTextTrack();
+        if (track && track.bcp47 && track.bcp47 !== 'off') {
+            return canonicalizeBcp47(track.bcp47);
+        }
+    }
+    return null;
+}
+
+function getCuesForLang(lang) {
+    if (!lang || lang === 'unknown') return null;
+    const target = canonicalizeBcp47(lang);
+    for (let i = interceptedCues.length - 1; i >= 0; i--) {
+        const ic = interceptedCues[i];
+        const icLang = (ic.lang && ic.lang !== 'unknown') ? canonicalizeBcp47(ic.lang) : 'unknown';
+        if (ic.videoId === activeVideoId && icLang === target && ic.cues && ic.cues.length > 0) {
+            return ic.cues;
+        }
+    }
+    return null;
+}
+
+function getActiveCueInfo(time) {
+    if (!currentCues || currentCues.length === 0) return null;
+    for (let i = 0; i < currentCues.length; i++) {
+        const c = currentCues[i];
+        if (time >= c.start && time <= c.end) {
+            return { cue: c, index: i };
+        }
+        if (time < c.start) {
+            return { cue: null, index: i };
+        }
+    }
+    return { cue: null, index: currentCues.length - 1 };
+}
+
+function pausePlayback() {
+    if (player && typeof player.pause === 'function') {
+        player.pause();
+        return;
+    }
+    const video = document.querySelector('video');
+    if (video) video.pause();
+}
+
+function resumePlayback() {
+    if (player && typeof player.play === 'function') {
+        player.play();
+        return;
+    }
+    const video = document.querySelector('video');
+    if (video) video.play();
+}
+
+function handleSentenceMode() {
+    if (!subStyle.sentenceMode) return;
+    if (!player) return;
+    if (!currentCues || currentCues.length === 0) {
+        const lang = resolveCurrentLang();
+        const cues = getCuesForLang(lang);
+        if (cues && cues.length > 0) {
+            currentCues = cues;
+        } else {
+            return;
+        }
+    }
+
+    const t = player.getCurrentTime();
+    const info = getActiveCueInfo(t);
+
+    if (info && info.cue) {
+        sentenceLastCue = info.cue;
+    }
+
+    const epsilon = 0.05;
+    if (sentenceLastCue && !sentencePaused && t >= (sentenceLastCue.end - epsilon)) {
+        pausePlayback();
+        sentencePaused = true;
+        showToast('Paused');
+    }
+}
+
+function resumeNextSentence() {
+    if (!player) return;
+    if (!currentCues || currentCues.length === 0) return;
+
+    let idx = -1;
+    if (sentenceLastCue) {
+        idx = currentCues.findIndex(c => c.start === sentenceLastCue.start && c.end === sentenceLastCue.end);
+    }
+    if (idx === -1) {
+        const t = player.getCurrentTime();
+        performSeek(t, 1);
+        resumePlayback();
+        sentencePaused = false;
+        return;
+    }
+
+    const nextIdx = Math.min(idx + 1, currentCues.length - 1);
+    const nextCue = currentCues[nextIdx];
+    if (nextCue) {
+        player.seek(nextCue.start);
+        resumePlayback();
+        sentencePaused = false;
+        showToast(nextCue.text || 'Next');
     }
 }
 
@@ -1073,7 +1371,10 @@ function toggleLanguage() {
     let targetList = validTracks;
 
     // Use registeredLangs to prioritize languages
-    const registeredTracks = validTracks.filter(t => registeredLangs[t.bcp47]);
+    const registeredTracks = validTracks.filter(t => {
+        const lang = canonicalizeBcp47(t.bcp47 || '');
+        return lang && registeredLangs[lang];
+    });
     if (registeredTracks.length > 0) {
         targetList = registeredTracks;
     }
@@ -1082,7 +1383,8 @@ function toggleLanguage() {
     if (currentTrack && !currentTrack.isNone) {
         currentIndex = targetList.findIndex(t => t.trackId === currentTrack.trackId);
         if (currentIndex === -1) {
-            currentIndex = targetList.findIndex(t => t.bcp47 === currentTrack.bcp47);
+            const currentLang = canonicalizeBcp47(currentTrack.bcp47 || '');
+            currentIndex = targetList.findIndex(t => canonicalizeBcp47(t.bcp47 || '') === currentLang);
         }
     }
 
@@ -1155,17 +1457,24 @@ function registerCurrentLanguage() {
         return;
     }
 
-    const lang = track.bcp47;
+    const lang = canonicalizeBcp47(track.bcp47);
     if (!lang) return; // Invalid bcp47
 
     const displayName = track.displayName || lang;
 
-    if (!registeredLangs[lang]) {
+    const normLang = canonicalizeBcp47(lang);
+
+    if (!registeredLangs[normLang]) {
         console.log(`[Ext] Registering new language: ${lang} (${displayName})`);
-        registeredLangs[lang] = {
+        registeredLangs[normLang] = {
             selected: true, // Auto-select by default
             displayName: displayName
         };
+        if (!Array.isArray(subStyle.langOrder)) subStyle.langOrder = [];
+        if (!subStyle.langOrder.includes(normLang)) {
+            subStyle.langOrder.push(normLang);
+            saveSettings();
+        }
 
         // Re-tag any 'unknown' cues as this language
         // This handles the case where subtitles loaded before language was detected
@@ -1180,17 +1489,17 @@ function registerCurrentLanguage() {
         updateLanguageListUI();
     } else {
         // Update display name if it changed (e.g. from a weird state to a correct one)
-        if (registeredLangs[lang].displayName !== displayName) {
-            console.log(`[Ext] Updating display name for ${lang}: ${registeredLangs[lang].displayName} -> ${displayName}`);
-            registeredLangs[lang].displayName = displayName;
+        if (registeredLangs[normLang].displayName !== displayName) {
+            console.log(`[Ext] Updating display name for ${lang}: ${registeredLangs[normLang].displayName} -> ${displayName}`);
+            registeredLangs[normLang].displayName = displayName;
             updateLanguageListUI();
         }
     }
 
     // Check if primary language changed (to update badge colors)
-    if (lastPrimaryLang !== lang) {
+    if (lastPrimaryLang !== normLang) {
         console.log(`[Ext] Primary language changed: ${lastPrimaryLang} -> ${lang}`);
-        lastPrimaryLang = lang;
+        lastPrimaryLang = normLang;
         updateLanguageListUI();
     }
 }
@@ -1204,8 +1513,11 @@ function updateLanguageListUI() {
         container.style.top = '20px';
         container.style.right = '20px';
         container.style.display = 'flex';
-        container.style.flexDirection = 'column';
+        container.style.flexDirection = 'row-reverse';
+        container.style.flexWrap = 'wrap';
         container.style.gap = '5px';
+        container.style.justifyContent = 'flex-start';
+        container.style.alignItems = 'flex-start';
         container.style.zIndex = '2147483647';
         container.style.pointerEvents = 'auto'; // Must be clickable
         document.body.appendChild(container);
@@ -1223,7 +1535,9 @@ function updateLanguageListUI() {
     // Use lastPrimaryLang instead of querying player to avoid stale data
     const currentLang = lastPrimaryLang;
 
-    Object.keys(registeredLangs).forEach(lang => {
+    const orderedLangs = getOrderedLangs();
+    orderedLangs.forEach(lang => {
+        const normLang = canonicalizeBcp47(lang);
         const data = registeredLangs[lang];
         const badge = document.createElement('div');
         badge.innerText = data.displayName;
@@ -1237,28 +1551,76 @@ function updateLanguageListUI() {
         badge.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
 
         // Check if this is the primary language
-        const isPrimary = (lang === currentLang);
+        const isPrimary = (normLang === currentLang);
+
+        let baseBg = '';
+        let hoverBg = '';
+        let baseOpacity = 1;
+        let hoverOpacity = 1;
 
         if (isPrimary) {
-            // Primary language - Blue/Purple
-            badge.style.backgroundColor = 'rgba(52, 152, 219, 0.9)'; // Blue
+            // Primary language - Softer Green
+            baseBg = 'rgba(46, 204, 113, 0.35)';
+            hoverBg = 'rgba(46, 204, 113, 0.8)';
             badge.style.color = 'white';
-            badge.style.opacity = '1';
-            badge.style.border = '2px solid rgba(255, 255, 255, 0.8)';
+            baseOpacity = 0.65;
+            hoverOpacity = 1;
+            badge.style.border = '1px solid rgba(255, 255, 255, 0.45)';
         } else if (data.selected) {
-            // Selected for Multi-Sub - Green
-            badge.style.backgroundColor = 'rgba(46, 204, 113, 0.9)'; // Green
+            // Selected for Multi-Sub - Softer Blue (previous primary color)
+            baseBg = 'rgba(52, 152, 219, 0.35)';
+            hoverBg = 'rgba(52, 152, 219, 0.8)';
             badge.style.color = 'white';
-            badge.style.opacity = '1';
+            baseOpacity = 0.65;
+            hoverOpacity = 1;
         } else {
             // Unselected (hidden from Multi-Sub) - Grey
-            badge.style.backgroundColor = 'rgba(0, 0, 0, 0.6)'; // Grey/Black
+            baseBg = 'rgba(0, 0, 0, 0.25)';
+            hoverBg = 'rgba(0, 0, 0, 0.6)';
             badge.style.color = '#aaa';
-            badge.style.opacity = '0.7';
+            baseOpacity = 0.5;
+            hoverOpacity = 0.9;
         }
+        badge.style.backgroundColor = baseBg;
+        badge.style.opacity = baseOpacity;
+
+        badge.onmouseenter = () => {
+            badge.style.backgroundColor = hoverBg;
+            badge.style.opacity = hoverOpacity;
+        };
+        badge.onmouseleave = () => {
+            badge.style.backgroundColor = baseBg;
+            badge.style.opacity = baseOpacity;
+        };
 
         // Click Handling (Single vs Double)
         let clickTimer = null;
+
+        badge.draggable = true;
+        badge.dataset.lang = normLang;
+        badge.ondragstart = (e) => {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', normLang);
+        };
+        badge.ondragover = (e) => {
+            e.preventDefault();
+        };
+        badge.ondrop = (e) => {
+            e.preventDefault();
+            const src = e.dataTransfer.getData('text/plain');
+            const target = normLang;
+            if (!src || !target || src === target) return;
+            const order = getOrderedLangs();
+            const from = order.indexOf(src);
+            const to = order.indexOf(target);
+            if (from === -1 || to === -1) return;
+            order.splice(from, 1);
+            order.splice(to, 0, src);
+            subStyle.langOrder = order;
+            saveSettings();
+            updateLanguageListUI();
+            updateMultiSubOverlay();
+        };
 
         badge.onclick = (e) => {
             e.stopPropagation();
@@ -1272,7 +1634,7 @@ function updateLanguageListUI() {
                     turnOffSubtitles();
                 } else {
                     // If clicking non-primary badge, switch to that language
-                    switchLanguage(lang);
+                    switchLanguage(normLang);
                 }
             } else {
                 clickTimer = setTimeout(() => {
@@ -1287,6 +1649,15 @@ function updateLanguageListUI() {
 
         container.appendChild(badge);
     });
+}
+
+function getOrderedLangs() {
+    const order = Array.isArray(subStyle.langOrder) ? [...subStyle.langOrder] : [];
+    const reg = Object.keys(registeredLangs);
+    reg.forEach(lang => {
+        if (!order.includes(lang)) order.push(lang);
+    });
+    return order.filter(lang => registeredLangs[lang]);
 }
 
 function turnOffSubtitles() {
@@ -1326,7 +1697,8 @@ function switchLanguage(targetLang) {
         return name !== 'off' && name !== '끄기' && !t.isNone;
     });
 
-    const targetTrack = validTracks.find(t => t.bcp47 === targetLang);
+    const targetNorm = canonicalizeBcp47(targetLang || '');
+    const targetTrack = validTracks.find(t => canonicalizeBcp47(t.bcp47 || '') === targetNorm);
     if (targetTrack) {
         console.log(`[Ext] Double-click switch to: ${targetLang}`);
         player.setTextTrack(targetTrack);
