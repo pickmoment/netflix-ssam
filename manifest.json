@@ -19,7 +19,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["injected.js"],
+      "resources": ["injected.js", "core.js", "adapters/netflix.js"],
       "matches": ["*://*.netflix.com/*"]
     }
   ]
