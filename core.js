@@ -173,8 +173,9 @@ function processSubtitleText(url, text) {
                 lang = canonicalizeBcp47(lang);
             }
 
-            // Create a simple content hash for duplicate detection
-            const contentHash = cues.slice(0, 5).map(c => c.text).join('|');
+            // Create a simple content hash with timings for duplicate detection
+            // Timings are included so if an ad shifts the timeline, we re-parse the new subtitles
+            const contentHash = cues.slice(0, 5).map(c => `${c.start}-${c.end}-${c.text}`).join('|');
 
             // Check for duplicates by language and content hash
             const langNorm = (lang && lang !== 'unknown') ? canonicalizeBcp47(lang) : 'unknown';
@@ -578,10 +579,23 @@ function formatTime(milliseconds) {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.padStart(6, '0')}`;
 }
 
+function isAdPlaying() {
+    if (!player) return false;
+    return document.querySelector('[data-uia^="ad-"]') !== null ||
+        document.querySelector('[data-uia="ads-info-text"]') !== null ||
+        document.querySelector('.ad-break-container') !== null ||
+        document.querySelector('.PlayerControlsNeo__ad-container') !== null ||
+        document.querySelector('.ad-timer') !== null ||
+        (player.getDuration && player.getDuration() < 120000); // Usually ads are short (< 2 min)
+}
+
 // Helper function to check if multi-sub should be shown
 function shouldShowMultiSub() {
     if (!player) return false;
     if (!subStyle.multiSubEnabled) return false;
+
+    // Detect if an ad is currently playing using common Netflix ad DOM elements
+    if (isAdPlaying()) return false;
 
     // Use lastPrimaryLang instead of querying player
     // This ensures Multi-Sub shows selected languages even when subtitles are off
@@ -634,7 +648,7 @@ function updateMultiSubOverlay() {
     overlay.style.left = `${subStyle.hPosition}%`;
     overlay.style.right = 'auto';
     const yTransform = (subStyle.vAlign === 'center') ? '-50%' : '0';
-    overlay.style.transform = `translate(${ -subStyle.hPosition}%, ${yTransform})`;
+    overlay.style.transform = `translate(${-subStyle.hPosition}%, ${yTransform})`;
 
     // --- Vertical Alignment ---
     // subStyle.bottom acts as "Margin from Edge"
@@ -768,7 +782,8 @@ function toggleSettings() {
     settings = document.createElement('div');
     settings.id = 'netflix-ext-settings';
     settings.style.position = 'fixed';
-    settings.style.top = '20%';
+    settings.style.top = '50%';
+    settings.style.transform = 'translateY(-50%)';
     settings.style.right = '20px';
     settings.style.backgroundColor = 'rgba(0,0,0,0.9)';
     settings.style.padding = '20px';
@@ -779,6 +794,10 @@ function toggleSettings() {
     settings.style.flexDirection = 'column';
     settings.style.gap = '10px';
     settings.style.minWidth = '250px';
+    settings.style.maxWidth = '90vw';
+    settings.style.maxHeight = '90vh';
+    settings.style.overflowY = 'auto';
+    settings.style.overflowX = 'hidden';
     settings.style.boxShadow = '0 0 10px rgba(0,0,0,0.5)';
 
     const title = document.createElement('h3');
@@ -886,16 +905,18 @@ function addSetting(parent, label, type, value, onChange, min, max, step) {
 
     const input = document.createElement('input');
     input.type = type;
+
+    if (min !== undefined) input.min = min;
+    if (max !== undefined) input.max = max;
+    if (step !== undefined) input.step = step;
+
     input.value = value;
+
     input.style.color = 'black';
     input.style.backgroundColor = 'white';
     input.style.border = '1px solid #ccc';
     input.style.padding = '4px';
     input.style.borderRadius = '4px';
-
-    if (min !== undefined) input.min = min;
-    if (max !== undefined) input.max = max;
-    if (step !== undefined) input.step = step;
 
     input.addEventListener('input', (e) => {
         onChange(e.target.value);
@@ -1150,6 +1171,8 @@ function resumePlayback() {
 function handleSentenceMode() {
     if (!subStyle.sentenceMode) return;
     if (!player) return;
+    if (isAdPlaying()) return; // Do not pause playback during ads
+
     if (!currentCues || currentCues.length === 0) {
         const lang = resolveCurrentLang();
         const cues = getCuesForLang(lang);
