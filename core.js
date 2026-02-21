@@ -581,8 +581,10 @@ function formatTime(milliseconds) {
 
 function isAdPlaying() {
     if (!player) return false;
-    return document.querySelector('[data-uia^="ad-"]') !== null ||
-        document.querySelector('[data-uia="ads-info-text"]') !== null ||
+    // Check for specific ad elements to avoid broad matches with normal UI controls
+    return document.querySelector('[data-uia="ads-info-text"]') !== null ||
+        document.querySelector('[data-uia="ad-indicator"]') !== null ||
+        document.querySelector('[data-uia="ad-choices"]') !== null ||
         document.querySelector('.ad-break-container') !== null ||
         document.querySelector('.PlayerControlsNeo__ad-container') !== null ||
         document.querySelector('.ad-timer') !== null ||
@@ -621,21 +623,25 @@ function updateMultiSubOverlay() {
     if (!player) return;
 
     let overlay = document.getElementById('netflix-ext-multisub');
-    const targetContainer = document.fullscreenElement || document.body;
+    // Try to find the actual player container for better layering, fallback to fullscreen or body
+    const targetContainer = document.querySelector('.watch-video') ||
+        document.querySelector('.nf-player-container') ||
+        document.fullscreenElement ||
+        document.body;
 
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'netflix-ext-multisub';
         overlay.style.position = 'fixed';
-        overlay.style.zIndex = '2147483647'; // Max z-index
+        overlay.style.setProperty('z-index', '2147483647', 'important');
         overlay.style.pointerEvents = 'none';
         overlay.style.display = 'flex';
         overlay.style.flexDirection = 'column';
         overlay.style.gap = '4px';
         targetContainer.appendChild(overlay);
     } else {
-        // Ensure it's in the correct container (moves it if needed)
-        if (overlay.parentElement !== targetContainer) {
+        // Ensure it's in the correct container and is the last child (topmost in DOM order)
+        if (overlay.parentElement !== targetContainer || targetContainer.lastElementChild !== overlay) {
             targetContainer.appendChild(overlay);
         }
     }
